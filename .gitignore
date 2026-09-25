@@ -1,0 +1,38 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# build / jit artifacts
+build/
+*.so
+*.o
+*.cubin
+*.ptx
+.ninja_deps
+.ninja_log
+
+# model weights & converted checkpoints (never commit these)
+*.gguf
+*.safetensors
+*.bin
+*.pth
+model.safetensors.index.json
+bonsai_vllm/
+bonsai_vllm-*/
+out/
+outputs/
+
+# logs / local state
+*.log
+*.jsonl
+*.csv
+metrics_trace*
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
