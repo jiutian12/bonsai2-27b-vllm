@@ -10,6 +10,10 @@
 > 质量 280 题 **88.2%**（llama.cpp 同权重 87.9%），且**评测墙钟快 3.4×**；
 > **256K 单路可用**（实测 262,089 token 请求成功），配 4-bit KV 可**双路 ~258K**。
 >
+> **图像 / 视频输入**：`tools/vis_convert.py` 用文本 checkpoint + mmproj
+> 视觉塔生成 `bonsai_vllm_vl`，`tools/smoke_video.py` 冒烟验证
+> （详见后文"多模态（图像 / 视频）支持"一节）。
+>
 > 这个仓库只包含**转换/校验/压测工具与工程笔记**，不含任何模型权重，也不含插件源码
 > （插件版权属于其作者，见文末 Credits）。
 
@@ -174,6 +178,8 @@ tools/
   bench_speed.py              深度-速度曲线（流式，TTFT 与 decode 分离）
   bench_concurrency.py        1→128 并发扫描（聚合吞吐 + p50/p90 + KV 峰值）
   probe_long_context.py       指定长度 / 路数的长上下文探针（带 /metrics 实时判定）
+  vis_convert.py              文本 checkpoint + mmproj 视觉塔 -> 视觉+视频 checkpoint（model.visual.*）
+  smoke_video.py              图像 / 视频多模态冒烟（生成 testsrc 小片，经 API 验证）
 docs/
   01-porting-notes.md         移植细节：折叠权重、名字映射、vperm、norm 偏移
   02-vram-budget.md           显存账本与"引擎税"
@@ -181,7 +187,64 @@ docs/
   04-long-prefill-concurrency.md  长 prompt 并发 prefill 为什么退化，以及怎么改、代价多大
 ```
 
-## 8. Credits & 授权
+## 8. 多模态（图像 / 视频）支持
+
+文本 checkpoint（§3 的 `convert_gguf_to_vllm.py` 产物）只跑纯文本。要支持**图像 /
+视频**，再用 `tools/vis_convert.py` 把它 + PrismML 分发的视觉塔
+（`*.mmproj-Q8_0.gguf`）合成一个带 `model.visual.*` 的视觉 checkpoint：
+
+```bash
+# 视觉塔 GGUF（与 LLM 权重分开下载，见 Credits）
+mmproj=~/bonsai/models/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf
+python tools/vis_convert.py ./bonsai_vllm ./bonsai_vllm_vl "$mmproj"
+```
+
+产物要点：`config.json` 的 `vision_config.temporal_patch_size = 2` 是视频开关
+（两帧打包成一个时序 patch）；`patch_embed` 用 mmproj 的两段权重拼成
+`Conv3d(1152,3,2,16,16)`；`model.visual.*` 为 bf16 的视觉塔（27 层）+ merger。
+vLLM 的 Qwen3.5-VL 预处理器原生处理帧采样（fps / 最大帧数），**无需在
+checkpoint 里显式写** `max_num_frames` / `fps`。
+
+起服务：把 `CKPT` 指向视觉 checkpoint（其余与 §3 相同）：
+
+```bash
+VENV=$VENV CKPT=./bonsai_vllm_vl PORT=8000 bash tools/serve_vllm_bonsai.sh
+```
+
+冒烟验证（生成 2s testsrc 小片，问模型"视频里是什么"）：
+
+```bash
+VLLM_PORT=8000 VLLM_MODEL=qwen3.8-27b python tools/smoke_video.py
+```
+
+预期返回 200，模型描述出圆形彩条测试卡 + 右侧数字从 0 变 1，`prompt_tokens`
+约 200 上下（2s、256×256、4fps 的低清片）。
+
+客户端调用（OpenAI 兼容 API）：`url` 必须嵌套在 `video_url` / `image_url`
+对象里，且是完整 data URL（vLLM 0.28 对 `video_url` 传顶层 `url` 会 400
+——这是该版本的 Pydantic schema 要求）：
+
+```python
+import base64, urllib.request, json
+mp4_b64 = base64.b64encode(open("clip.mp4","rb").read()).decode()
+body = {"model":"qwen3.8-27b","max_tokens":128,
+        "messages":[{"role":"user","content":[
+            {"type":"text","text":"这段视频里看到什么？"},
+            {"type":"video_url","video_url":
+             {"url":"data:image/jpeg;base64,"+mp4_b64}}]}}
+req = urllib.request.Request("http://127.0.0.1:8000/v1/chat/completions",
+                             data=json.dumps(body).encode(),
+                             headers={"Content-Type":"application/json"})
+print(json.load(urllib.request.urlopen(req, timeout=600))["choices"][0]
+      ["message"]["content"][:200])
+# 图像同理：{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+img_b64}}
+```
+
+> 坑：虽然内容是 mp4，mime 标签写 `data:image/jpeg;base64` 即可（vLLM 按
+> base64 内容自动识别容器，已实测 200）；关键是 `video_url` 对象结构
+> （顶层 `url` 是 vLLM 0.28 的已知坑，本仓库脚本里已按正确写法实现）。
+
+## 9. Credits & 授权
 
 - **权重**：Bonsai 2 27B 由 **PrismML** 发布（ternary 2-bit + 折叠 Hadamard）。
   本仓库**不分发权重**，只提供从你本地 GGUF 生成 vLLM checkpoint 的工具。
